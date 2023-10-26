@@ -1,33 +1,22 @@
 from __future__ import print_function
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from linformer import Linformer
-from PIL import Image
-from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
-from vit_pytorch.efficient import ViT
-from sklearn.metrics import roc_curve, roc_auc_score
-from sklearn.metrics import confusion_matrix
 import torch.utils.data as data
 import torchvision
-from torchvision.transforms import ToTensor
 import torchvision.transforms as transforms
 import wandb
 from pytorch_pretrained_vit import ViT
-
+import argparse
 torch.cuda.empty_cache()
+parser = argparse.ArgumentParser(description="Your script description")
+parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint file for resuming training")
+args = parser.parse_args()
 
-batch_size = 64
+batch_size = 16
 epochs = 500
 lr = 3e-5
-gamma = 0.7
-seed = 142
-IMG_SIZE = 512
-patch_size = 8
 num_classes = 225
 
 wandb.init(project="AUTSL100_colorData_ViT", name='AUTSL_all_data_different_color_pretrained_384', config={
@@ -42,9 +31,9 @@ data_transforms = transforms.Compose([
 ])
 
 # Tensor Transforms (with Augmentation) and Pytorch Preprocessing:
-train_ds = torchvision.datasets.ImageFolder("../AUTSL_full_diff_color_all_hand_with_pose3/train", transform=data_transforms)
-valid_ds = torchvision.datasets.ImageFolder("../AUTSL_full_diff_color_all_hand_with_pose3/val", transform=data_transforms)
-test_ds = torchvision.datasets.ImageFolder("../AUTSL_full_diff_color_all_hand_with_pose3/test", transform=data_transforms)
+train_ds = torchvision.datasets.ImageFolder("../AUTSL_converted_data/train", transform=data_transforms)
+valid_ds = torchvision.datasets.ImageFolder("../AUTSL_converted_data/val", transform=data_transforms)
+test_ds = torchvision.datasets.ImageFolder("../AUTSL_converted_data/test", transform=data_transforms)
 
 # Data Loaders:
 train_loader = data.DataLoader(train_ds, batch_size=batch_size, num_workers=4)
@@ -63,10 +52,28 @@ class CustomHead(nn.Module):
         x = self.fc(x)
         return x
     
-model = ViT('B_16_imagenet1k', pretrained=True)
-model.head = CustomHead(num_classes)
-model.eval()
 
+epoch = 0
+if args.resume is not None:
+    model = ViT('B_16_imagenet1k')
+    model.head = CustomHead(num_classes)
+    modelPath = args.resume
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    print(f"Loading model from {args.resume}.")
+    #model = nn.DataParallel(model)
+    #checkpoint = torch.load(modelPath)
+    checkpoint = torch.load(modelPath, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+
+else: 
+    print("not resuming")
+    model = ViT('B_16_imagenet1k', pretrained=True)
+    model.head = CustomHead(num_classes)
+
+model.eval()
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs for training.")
     model = nn.DataParallel(model)
@@ -74,11 +81,11 @@ model = model.to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=lr)
-scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 
 best_val_loss = float('inf')
 
-for epoch in range(epochs):
+for epoch in range(epoch,epochs):
+    print("number of epochs: ",epoch)
     model.train()
     running_loss = 0.0
     for data, label in tqdm(train_loader):
@@ -117,11 +124,17 @@ for epoch in range(epochs):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
-            # Save the model's state_dict to a file
-            #torch.save(model.state_dict(), 'best_model.pth')
-            #torch.save(model.state_dict(), f'weights/best_{epoch}.pth')
-            torch.save(model.state_dict(), 'weights/best_all_data.pth')
-        torch.save(model.state_dict(), 'weights/last_all_data.pth')
+            bestModelPath = 'weights/best_all_data.pth'
+            torch.save({'epoch':epoch,
+                        'model_state_dict':model.module.state_dict(),
+                        'optimizer_state_dict':optimizer.state_dict(),
+                        'loss':val_loss},bestModelPath)
+        lastModelPath = 'weights/last_all_data.pth' 
+        torch.save({'epoch':epoch,
+                        'model_state_dict':model.module.state_dict(),
+                        'optimizer_state_dict':optimizer.state_dict(),
+                        'loss':val_loss},bestModelPath)
+                        
         wandb.log({"Training Loss": train_loss,
                    "Validation Loss": val_loss,
                    "Validation Accuracy": (100 * correct / total)})
